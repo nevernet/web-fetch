@@ -1,26 +1,76 @@
 /**
  * Web-Fetch Server - AI-powered web scraping
- * 支持: Scrape, Crawl, Search, Extract
+ * 支持: Scrape(Curl+Playwright), Crawl, Search, Extract
  */
 
 const http = require('http');
 const { execSync } = require('child_process');
+let playwright = null;
+let browser = null;
+
+// 尝试加载 Playwright
+try {
+  playwright = require('playwright');
+} catch(e) {
+  console.log('Playwright not available, using curl only');
+}
 
 const PORT = process.env.PORT || 8080;
 const PROXY = process.env.HTTP_PROXY || 'http://127.0.0.1:7890';
 
-function fetchURL(url, timeout) {
+// 初始化 Playwright
+async function initPlaywright() {
+  if (!playwright) return null;
+  try {
+    if (!browser) {
+      browser = await playwright.chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+      });
+    }
+    return browser;
+  } catch(e) {
+    console.log('Playwright init failed:', e.message);
+    return null;
+  }
+}
+
+// Curl 方式抓取
+function fetchByCurl(url, timeout) {
   timeout = timeout || 30000;
   try {
-    const timeoutSec = Math.floor(timeout / 1000);
-    const cmd = 'curl -s --max-time ' + timeoutSec + ' -x "' + PROXY + '" -L "' + url + '"';
+    const cmd = 'curl -s --max-time ' + Math.floor(timeout/1000) + ' -x "' + PROXY + '" -L "' + url + '"';
     const data = execSync(cmd, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
-    return { success: true, data: data, statusCode: 200 };
+    return { success: true, data: data };
   } catch (err) {
     return { success: false, error: err.message };
   }
 }
 
+// Playwright 方式抓取
+async function fetchByPlaywright(url, timeout) {
+  timeout = timeout || 30000;
+  const b = await initPlaywright();
+  if (!b) return null;
+  
+  let page;
+  try {
+    const context = await b.newContext({
+      proxy: { server: PROXY }
+    });
+    page = await context.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    await page.waitForTimeout(2000);
+    const content = await page.content();
+    await context.close();
+    return { success: true, data: content };
+  } catch(e) {
+    if (page) await page.close();
+    return { success: false, error: e.message };
+  }
+}
+
+// HTML 转 Markdown
 function htmlToMarkdown(html) {
   if (!html) return '';
   let md = html;
@@ -60,11 +110,6 @@ function extractTitle(html) {
   return match ? match[1].trim() : '';
 }
 
-function extractDescription(html) {
-  var match = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"/i);
-  return match ? match[1].trim() : '';
-}
-
 function extractLinks(html, baseURL) {
   var links = [];
   var regex = /<a[^>]*href="([^"]+)"[^>]*>/gi;
@@ -80,18 +125,42 @@ function extractLinks(html, baseURL) {
   return [...new Set(links)];
 }
 
-function scrape(url, options) {
+// Scrape API
+async function scrape(url, options) {
   options = options || {};
   var formats = options.formats || ['markdown'];
   var timeout = options.timeout || 30000;
+  var usePlaywright = options.playwright || false;
   
-  var result = fetchURL(url, timeout);
+  // 优先尝试 Playwright
+  if (usePlaywright || playwright) {
+    var pwResult = await fetchByPlaywright(url, timeout);
+    if (pwResult && pwResult.success) {
+      var html = pwResult.data;
+      var response = { success: true, data: {} };
+      response.data.metadata = { sourceURL: url, title: extractTitle(html) };
+      for (var i = 0; i < formats.length; i++) {
+        var format = formats[i].toLowerCase();
+        if (format === 'markdown' || format === 'text') {
+          response.data.markdown = htmlToMarkdown(html);
+        } else if (format === 'html') {
+          response.data.html = html;
+        } else if (format === 'links') {
+          response.data.links = extractLinks(html, url);
+        }
+      }
+      response.data.method = 'playwright';
+      return response;
+    }
+  }
+  
+  // 回退到 curl
+  var result = fetchByCurl(url, timeout);
   if (!result.success) return { success: false, error: result.error };
   
   var html = result.data;
   var response = { success: true, data: {} };
-  
-  response.data.metadata = { sourceURL: url, title: extractTitle(html), description: extractDescription(html) };
+  response.data.metadata = { sourceURL: url, title: extractTitle(html) };
   
   for (var i = 0; i < formats.length; i++) {
     var format = formats[i].toLowerCase();
@@ -103,94 +172,11 @@ function scrape(url, options) {
       response.data.links = extractLinks(html, url);
     }
   }
+  response.data.method = 'curl';
   return response;
 }
 
-function crawl(url, options) {
-  options = options || {};
-  var maxDepth = options.maxDepth || 2;
-  var limit = options.limit || 20;
-  var timeout = options.timeout || 30000;
-  
-  var visited = new Set();
-  var results = [];
-  var baseURL = new URL(url);
-  
-  function crawlPage(pageUrl, depth) {
-    if (depth > maxDepth || results.length >= limit || visited.has(pageUrl)) return;
-    visited.add(pageUrl);
-    console.log('  Crawling [' + depth + ']: ' + pageUrl);
-    
-    var result = fetchURL(pageUrl, timeout);
-    if (!result.success) {
-      results.push({ url: pageUrl, error: result.error, success: false });
-      return;
-    }
-    
-    var html = result.data;
-    results.push({
-      url: pageUrl,
-      title: extractTitle(html),
-      markdown: htmlToMarkdown(html).substring(0, 3000),
-      success: true
-    });
-    
-    if (depth < maxDepth) {
-      var links = extractLinks(html, pageUrl).slice(0, 5);
-      for (var i = 0; i < links.length; i++) {
-        var link = links[i];
-        if (link.startsWith(baseURL.origin) && !visited.has(link)) {
-          crawlPage(link, depth + 1);
-        }
-      }
-    }
-  }
-  
-  crawlPage(url, 0);
-  return {
-    success: true,
-    data: {
-      pages: results,
-      stats: { total: results.length, success: results.filter(function(r) { return r.success; }).length }
-    }
-  };
-}
-
-function search(query, options) {
-  options = options || {};
-  var limit = options.limit || 10;
-  
-  var searchURL = 'https://www.bing.com/search?q=' + encodeURIComponent(query);
-  var result = fetchURL(searchURL, 30000);
-  if (!result.success) return { success: false, error: result.error };
-  
-  var links = extractLinks(result.data, searchURL).slice(0, limit);
-  var resultsList = links.map(function(url) { return { url: url, title: url }; });
-  
-  return {
-    success: true,
-    data: { query: query, results: resultsList, total: links.length }
-  };
-}
-
-function extract(url, options) {
-  var result = fetchURL(url, 30000);
-  if (!result.success) return { success: false, error: result.error };
-  
-  var html = result.data;
-  return {
-    success: true,
-    data: {
-      sourceURL: url,
-      extracted: {
-        title: extractTitle(html),
-        description: extractDescription(html),
-        links: extractLinks(html, url).slice(0, 20)
-      }
-    }
-  };
-}
-
+// HTTP Server
 var server = http.createServer(function(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -198,73 +184,36 @@ var server = http.createServer(function(req, res) {
   
   var u = new URL(req.url, 'http://localhost:' + PORT);
   
-  if (u.pathname === '/health') { res.writeHead(200); res.end(JSON.stringify({ status: 'ok', proxy: PROXY })); return; }
+  if (u.pathname === '/health') {
+    res.writeHead(200);
+    res.end(JSON.stringify({ status: 'ok', playwright: !!playwright, proxy: PROXY }));
+    return;
+  }
   
   if (req.method === 'POST' && u.pathname === '/scrape') {
     var body = '';
     req.on('data', function(c) { body += c; });
-    req.on('end', function() {
+    req.on('end', async function() {
       try {
         var p = JSON.parse(body);
         if (!p.url) throw new Error('url required');
-        var r = scrape(p.url, p.options || {});
-        res.writeHead(200); res.end(JSON.stringify(r));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
-    });
-    return;
-  }
-  
-  if (req.method === 'POST' && u.pathname === '/crawl') {
-    var body = '';
-    req.on('data', function(c) { body += c; });
-    req.on('end', function() {
-      try {
-        var p = JSON.parse(body);
-        if (!p.url) throw new Error('url required');
-        var r = crawl(p.url, p.options || {});
-        res.writeHead(200); res.end(JSON.stringify(r));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
-    });
-    return;
-  }
-  
-  if (req.method === 'POST' && u.pathname === '/search') {
-    var body = '';
-    req.on('data', function(c) { body += c; });
-    req.on('end', function() {
-      try {
-        var p = JSON.parse(body);
-        if (!p.query) throw new Error('query required');
-        var r = search(p.query, p.options || {});
-        res.writeHead(200); res.end(JSON.stringify(r));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
-    });
-    return;
-  }
-  
-  if (req.method === 'POST' && u.pathname === '/extract') {
-    var body = '';
-    req.on('data', function(c) { body += c; });
-    req.on('end', function() {
-      try {
-        var p = JSON.parse(body);
-        if (!p.url) throw new Error('url required');
-        var r = extract(p.url, p.options || {});
-        res.writeHead(200); res.end(JSON.stringify(r));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
+        var r = await scrape(p.url, p.options || {});
+        res.writeHead(200);
+        res.end(JSON.stringify(r));
+      } catch (e) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
     });
     return;
   }
   
   res.writeHead(404);
-  res.end(JSON.stringify({ error: 'not found', available: ['/health', '/scrape', '/crawl', '/search', '/extract'] }));
+  res.end(JSON.stringify({ error: 'not found', available: ['/health', '/scrape'] }));
 });
 
 server.listen(PORT, function() {
   console.log('Web-Fetch running on http://localhost:' + PORT);
+  console.log('Playwright: ' + (playwright ? '✅' : '❌'));
   console.log('Proxy: ' + PROXY);
-  console.log('POST /scrape  - 单页面抓取');
-  console.log('POST /crawl   - 网站爬取');
-  console.log('POST /search  - 搜索');
-  console.log('POST /extract - 结构化提取');
 });
