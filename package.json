@@ -5,7 +5,11 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop web-fetch",
+    "pm2:restart": "pm2 restart web-fetch",
+    "pm2:logs": "pm2 logs web-fetch"
   },
   "keywords": [
     "scraper",
@@ -16,6 +20,6 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "playwright": "^1.58.2"
+    "dotenv": "^17.3.1"
   }
 }

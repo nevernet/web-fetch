@@ -1,3 +1,4 @@
+require('dotenv').config();
 /**
  * Web-Fetch Server - AI-powered web scraping for RAG
  */
