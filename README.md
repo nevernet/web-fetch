@@ -5,10 +5,11 @@ AI 驱动的网页数据采集服务，将任意网站转换为 LLM 可用的结
 ## 功能特性
 
 - 🌐 **网页抓取** - 支持任意 URL 转 Markdown/HTML/JSON
+- 🕷️ **网站爬取** - 递归抓取整个网站，支持深度控制
+- 🔍 **搜索功能** - Bing 搜索 + 结果提取
+- 📊 **结构化提取** - 自动提取标题、描述、链接等
 - 🔄 **代理支持** - 自动通过代理访问国外网站
 - 📝 **格式转换** - HTML 转 Markdown，去除噪音内容
-- 🔗 **链接提取** - 自动提取页面所有外链
-- ⚡ **简单易用** - 轻量级 Node.js 服务
 
 ## 快速开始
 
@@ -39,7 +40,7 @@ HTTP_PROXY=http://your-proxy:port node src/index.js
 GET /health
 ```
 
-### 抓取网页
+### 网页抓取 (Scrape)
 
 ```bash
 POST /scrape
@@ -54,6 +55,47 @@ Content-Type: application/json
 }
 ```
 
+### 网站爬取 (Crawl)
+
+```bash
+POST /crawl
+Content-Type: application/json
+
+{
+  "url": "https://example.com",
+  "options": {
+    "maxDepth": 2,
+    "limit": 20,
+    "timeout": 30000
+  }
+}
+```
+
+### 搜索 (Search)
+
+```bash
+POST /search
+Content-Type: application/json
+
+{
+  "query": "AI news 2026",
+  "options": {
+    "limit": 10
+  }
+}
+```
+
+### 结构化提取 (Extract)
+
+```bash
+POST /extract
+Content-Type: application/json
+
+{
+  "url": "https://www.bbc.com/news"
+}
+```
+
 ### 响应示例
 
 ```json
@@ -62,10 +104,10 @@ Content-Type: application/json
   "data": {
     "metadata": {
       "sourceURL": "https://www.bbc.com/news",
-      "title": "BBC News - Breaking news..."
+      "title": "BBC News",
+      "description": "Breaking news..."
     },
     "markdown": "# BBC News\n\nBreaking news...",
-    "html": "<!DOCTYPE html>...",
     "links": ["https://...", "https://..."]
   }
 }
