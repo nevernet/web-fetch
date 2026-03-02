@@ -1,111 +1,62 @@
 /**
  * News Scheduler - 定时新闻采集
- * 支持 Reddit(通过搜索), 科技/新闻网站
+ * 专门采集中文新闻
  */
 
 const { execSync } = require('child_process');
 
 const PROXY = process.env.HTTP_PROXY || 'http://127.0.0.1:7890';
 
+// 中文新闻源
 const NEWS_SOURCES = {
-  // 国外新闻
-  bbc: { name: 'BBC News', url: 'https://www.bbc.com/news', category: 'world' },
-  reuters: { name: 'Reuters', url: 'https://www.reuters.com', category: 'world' },
-  techcrunch: { name: 'TechCrunch', url: 'https://techcrunch.com/', category: 'tech' },
-  verge: { name: 'The Verge', url: 'https://www.theverge.com/', category: 'tech' },
+  // 国内门户
+  sina_finance: { name: '新浪财经', url: 'https://finance.sina.com.cn/', category: '财经' },
+  sina_stock: { name: '新浪股票', url: 'https://finance.sina.com.cn/stock/', category: '财经' },
+  tencent_news: { name: '腾讯新闻', url: 'https://news.qq.com/', category: '综合' },
+  ifeng: { name: '凤凰网', url: 'https://www.ifeng.com/', category: '综合' },
   
-  // AI 新闻
-  openai: { name: 'OpenAI Blog', url: 'https://openai.com/blog', category: 'ai' },
-  anthropic: { name: 'Anthropic', url: 'https://www.anthropic.com', category: 'ai' },
+  // 科技
+  huxiu: { name: '虎嗅', url: 'https://www.huxiu.com/', category: '科技' },
+  kr36: { name: '36氪', url: 'https://www.36kr.com/', category: '科技' },
   
-  // 国内新闻
-  huxiu: { name: '虎嗅', url: 'https://www.huxiu.com/', category: 'tech' },
-  kr36: { name: '36氪', url: 'https://www.36kr.com/', category: 'tech' },
-  wangyi: { name: '网易新闻', url: 'https://news.163.com/', category: 'domestic' }
+  // 国际
+  bbc_cn: { name: 'BBC中文', url: 'https://www.bbc.com/zhongwen/simp', category: '国际' }
 };
 
 function fetchURL(url) {
   try {
-    const cmd = 'curl -s --max-time 30 -x "' + PROXY + '" -L -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" "' + url + '"';
-    const data = execSync(cmd, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+    const cmd = 'curl -s --max-time 20 -x "' + PROXY + '" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -L "' + url + '"';
+    const data = execSync(cmd, { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 });
     return { success: true, data };
   } catch (err) {
     return { success: false, error: err.message };
   }
 }
 
-function extractRedditFromSearch(html) {
-  const posts = [];
+function extractChineseTitles(html) {
+  const titles = [];
   
-  // 从搜索结果提取 Reddit 链接
-  const redditRegex = /<a[^>]*href="(https?:\/\/[^"]*reddit\.com[^"]*)"[^>]*>([^<]+)<\/a>/gi;
-  let match;
-  while ((match = redditRegex.exec(html)) !== null) {
-    const title = match[2].replace(/<[^>]+>/g, '').trim();
-    if (title && title.length > 5 && !title.includes('reddit')) {
-      posts.push(title);
-    }
-  }
-  
-  return [...new Set(posts)].slice(0, 10);
-}
-
-function extractHeadlines(html) {
-  const headlines = [];
-  
-  // 提取 h1, h2, h3 标题
-  const hRegex = /<h[1-3][^>]*>([^<]+)<\/h[1-3]>/gi;
+  // 提取标题标签
+  const hRegex = /<h[1-4][^>]*>([^<]+)<\/h[1-4]>/gi;
   let match;
   while ((match = hRegex.exec(html)) !== null) {
-    const title = match[1].replace(/<[^>]+>/g, '').trim();
-    if (title && title.length > 10 && title.length < 150) {
-      headlines.push(title);
+    let title = match[1].replace(/<[^>]+>/g, '').trim();
+    if (title && title.length > 4 && title.length < 60 && !title.includes('&') && !title.includes(';')) {
+      titles.push(title);
     }
   }
   
-  // 提取链接标题
-  const aRegex = /<a[^>]*title="([^"]*)"[^>]*>/gi;
+  // 提取普通链接标题
+  const aRegex = /<a[^>]*>([^<]{5,60})<\/a>/gi;
   while ((match = aRegex.exec(html)) !== null) {
-    const title = match[1].trim();
-    if (title && title.length > 10 && title.length < 150) {
-      headlines.push(title);
+    let title = match[1].replace(/<[^>]+>/g, '').trim();
+    if (title && title.length > 4 && title.length < 60 && !title.includes('&') && !title.includes(';')) {
+      titles.push(title);
     }
   }
   
-  return [...new Set(headlines)].slice(0, 15);
-}
-
-// Reddit 热门话题 - 通过 Bing 搜索
-function fetchReddit() {
-  console.log('Fetching: Reddit (via Bing)...');
-  
-  // 搜索 Reddit 热门
-  const searchQueries = [
-    'site:reddit.com trending today',
-    'site:reddit.com r/technology top',
-    'site:reddit.com r/artificial top'
-  ];
-  
-  const allPosts = [];
-  
-  for (const query of searchQueries) {
-    const searchURL = 'https://www.bing.com/search?q=' + encodeURIComponent(query);
-    const result = fetchURL(searchURL);
-    
-    if (result.success) {
-      const posts = extractRedditFromSearch(result.data);
-      allPosts.push(...posts);
-    }
-  }
-  
-  return {
-    source: 'Reddit',
-    url: 'https://www.reddit.com/',
-    category: 'social',
-    titles: [...new Set(allPosts)].slice(0, 15),
-    count: [...new Set(allPosts)].length,
-    timestamp: new Date().toISOString()
-  };
+  // 去重
+  return [...new Set(titles)].slice(0, 20);
 }
 
 function fetchNews(key) {
@@ -117,7 +68,7 @@ function fetchNews(key) {
   
   if (!result.success) return { error: result.error };
   
-  const titles = extractHeadlines(result.data);
+  const titles = extractChineseTitles(result.data);
   
   return {
     source: source.name,
@@ -129,36 +80,48 @@ function fetchNews(key) {
   };
 }
 
-function fetchAll(categories) {
+function fetchAll() {
   const results = {};
-  const keys = categories === 'all' ? Object.keys(NEWS_SOURCES) : categories.split(',');
-  
-  for (const key of keys) {
-    if (NEWS_SOURCES[key]) {
-      results[key] = fetchNews(key);
-    }
+  for (const key of Object.keys(NEWS_SOURCES)) {
+    results[key] = fetchNews(key);
   }
-  
-  // 添加 Reddit
-  results['reddit'] = fetchReddit();
-  
   return results;
 }
 
-function formatTelegram(results) {
-  let msg = '📰 全球新闻速览\n────────────────────\n\n';
+function formatForVoice(results) {
+  // 格式化语音播报 - 简洁中文
+  let text = '各位听众朋友们大家好，今天的新闻摘要来了。';
   
-  const cats = { world: '🌍 国际', tech: '💻 科技', ai: '🤖 AI', domestic: '🇨🇳 国内', social: '📱 Reddit' };
+  const cats = { '财经': '财经方面', '科技': '科技方面', '综合': '综合新闻', '国际': '国际方面' };
+  
+  for (const [key, data] of Object.entries(results)) {
+    if (data.titles && data.titles.length > 0) {
+      const catName = cats[data.category] || data.category;
+      text += catName + '，';
+      for (let i = 0; i < Math.min(3, data.titles.length); i++) {
+        text += data.titles[i] + '。';
+      }
+    }
+  }
+  
+  text += '以上就是今天的新闻摘要，谢谢收听。';
+  
+  return text;
+}
+
+function formatForTelegram(results) {
+  let msg = '📰 新闻速览\n────────────────────\n\n';
+  
+  const cats = { '财经': '💰 财经', '科技': '💻 科技', '综合': '📱 综合', '国际': '🌍 国际' };
   
   for (const [key, data] of Object.entries(results)) {
     if (data.error) {
-      msg += '❌ ' + (data.source || key) + ': ' + data.error + '\n';
+      msg += '❌ ' + data.source + ': ' + data.error + '\n';
     } else if (data.titles && data.titles.length > 0) {
       const cat = cats[data.category] || '📰';
       msg += cat + ' ' + data.source + '\n';
-      for (let i = 0; i < Math.min(5, data.titles.length); i++) {
-        const title = data.titles[i].substring(0, 50);
-        msg += '  • ' + title + '\n';
+      for (let i = 0; i < Math.min(4, data.titles.length); i++) {
+        msg += '  • ' + data.titles[i].substring(0, 40) + '\n';
       }
       msg += '\n';
     }
@@ -168,34 +131,23 @@ function formatTelegram(results) {
   return msg;
 }
 
+// CLI
 const cmd = process.argv[2];
-const arg = process.argv[3];
 
-if (cmd === 'list') {
+if (cmd === 'voice') {
+  console.log(formatForVoice(fetchAll()));
+} else if (cmd === 'telegram') {
+  console.log(formatForTelegram(fetchAll()));
+} else if (cmd === 'fetch') {
+  console.log(JSON.stringify(fetchAll(), null, 2));
+} else if (cmd === 'list') {
   console.log('新闻源列表:');
   for (const [k, v] of Object.entries(NEWS_SOURCES)) {
     console.log('  ' + k + ': ' + v.name + ' (' + v.category + ')');
   }
-  console.log('  reddit: Reddit (via Bing)');
-} else if (cmd === 'fetch') {
-  console.log(JSON.stringify(fetchAll(arg || 'all'), null, 2));
-} else if (cmd === 'telegram') {
-  console.log(formatTelegram(fetchAll(arg || 'all')));
-} else if (cmd === 'reddit') {
-  console.log(formatTelegram({ reddit: fetchReddit() }));
-} else if (cmd === 'ai') {
-  const results = {
-    openai: fetchNews('openai'),
-    anthropic: fetchNews('anthropic')
-  };
-  console.log(formatTelegram(results));
-} else if (cmd === 'watch') {
-  const interval = parseInt(arg) || 60000;
-  console.log('启动新闻监控，间隔: ' + interval + 'ms');
-  setInterval(() => {
-    console.log('\n=== ' + new Date().toISOString() + ' ===');
-    console.log(formatTelegram(fetchAll('all')));
-  }, interval);
 } else {
-  console.log('用法: node scheduler.js [list|fetch|telegram|reddit|ai|watch] [params]');
+  console.log('用法: node scheduler.js [voice|telegram|fetch|list]');
+  console.log('  voice     - 语音播报格式');
+  console.log('  telegram  - Telegram格式');
+  console.log('  fetch    - JSON格式');
 }
