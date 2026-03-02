@@ -1,6 +1,7 @@
 require('dotenv').config();
 /**
  * Web-Fetch Server - AI-powered web scraping for RAG
+ * 支持缓存机制
  */
 
 const http = require('http');
@@ -9,8 +10,13 @@ const { execSync } = require('child_process');
 let playwright = null;
 try { playwright = require('playwright'); } catch(e) {}
 
+// 缓存模块
+const cache = require('./cache');
+
 const PORT = process.env.PORT || 8080;
 const PROXY = process.env.HTTP_PROXY || 'http://127.0.0.1:7890';
+const CACHE_ENABLED = process.env.CACHE_ENABLED !== 'false'; // 默认启用缓存
+const CACHE_TTL = parseInt(process.env.CACHE_TTL || '3600'); // 缓存1小时
 
 let browser = null;
 async function initPlaywright() {
@@ -27,7 +33,7 @@ async function initPlaywright() {
 function fetchByCurl(url, timeout) {
   timeout = timeout || 30000;
   try {
-    const cmd = 'curl -s --max-time ' + Math.floor(timeout/1000) + ' -x "' + PROXY + '" -L "' + url + '"';
+    const cmd = 'curl -s --max-time ' + Math.floor(timeout/1000) + ' -x "' + PROXY + '" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -L "' + url + '"';
     const data = execSync(cmd, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
     return { success: true, data };
   } catch (err) {
@@ -123,6 +129,18 @@ async function scrape(url, options) {
   const formats = options.formats || ['markdown'];
   const timeout = options.timeout || 30000;
   const usePlaywright = options.playwright || false;
+  const noCache = options.noCache || false;
+  
+  // 缓存键生成
+  const cacheKey = cache.getCacheKey('scrape', { url, formats, timeout, usePlaywright });
+  
+  // 尝试从缓存获取
+  if (CACHE_ENABLED && !noCache) {
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+      return { success: true, data: cachedData.data, fromCache: true };
+    }
+  }
   
   let result;
   let method = 'curl';
@@ -154,6 +172,12 @@ async function scrape(url, options) {
     else if (f === 'links') response.data.links = extractLinks(html);
   }
   response.data.method = method;
+  
+  // 缓存结果
+  if (CACHE_ENABLED && !noCache) {
+    cache.set(cacheKey, response, CACHE_TTL);
+  }
+  
   return response;
 }
 
@@ -162,6 +186,18 @@ async function search(query, options) {
   options = options || {};
   const limit = options.limit || 10;
   const includeContent = options.includeContent || false;
+  const noCache = options.noCache || false;
+  
+  // 缓存键生成
+  const cacheKey = cache.getCacheKey('search', { query, limit, includeContent });
+  
+  // 尝试从缓存获取
+  if (CACHE_ENABLED && !noCache) {
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+      return { success: true, data: cachedData.data, fromCache: true };
+    }
+  }
   
   // 使用 DuckDuckGo HTML 版本
   const searchURL = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
@@ -218,7 +254,7 @@ async function search(query, options) {
     }
   }
   
-  return {
+  const response = {
     success: true,
     data: {
       query: query,
@@ -226,6 +262,13 @@ async function search(query, options) {
       total: results.length
     }
   };
+  
+  // 缓存结果
+  if (CACHE_ENABLED && !noCache) {
+    cache.set(cacheKey, response.data, CACHE_TTL);
+  }
+  
+  return response;
 }
 
 async function extract(url, options) {
@@ -260,7 +303,45 @@ const server = http.createServer(async (req, res) => {
   
   if (pathname === '/health') {
     res.writeHead(200);
-    res.end(JSON.stringify({ status: 'ok', playwright: !!playwright, proxy: PROXY }));
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      playwright: !!playwright, 
+      proxy: PROXY,
+      cache: {
+        enabled: CACHE_ENABLED,
+        ttl: CACHE_TTL,
+        status: cache.status()
+      }
+    }));
+    return;
+  }
+  
+  // 缓存管理接口
+  if (pathname === '/cache/status') {
+    res.writeHead(200);
+    res.end(JSON.stringify(cache.status()));
+    return;
+  }
+  
+  if (pathname === '/cache/clear' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const p = JSON.parse(body);
+        const key = p.key;
+        if (key) {
+          cache.clear(key);
+        } else {
+          cache.clearAll();
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, status: cache.status() }));
+      } catch (e) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
     return;
   }
   
@@ -319,11 +400,12 @@ const server = http.createServer(async (req, res) => {
   }
   
   res.writeHead(404);
-  res.end(JSON.stringify({ error: 'not found', available: ['/health', '/scrape', '/search', '/extract'] }));
+  res.end(JSON.stringify({ error: 'not found', available: ['/health', '/cache/status', '/cache/clear', '/scrape', '/search', '/extract'] }));
 });
 
 server.listen(PORT, () => {
   console.log('Web-Fetch running on http://localhost:' + PORT);
   console.log('Playwright: ' + (playwright ? '✅' : '❌'));
   console.log('Proxy: ' + PROXY);
+  console.log('Cache: ' + (CACHE_ENABLED ? '✅ enabled (TTL: ' + CACHE_TTL + 's)' : '❌ disabled'));
 });
