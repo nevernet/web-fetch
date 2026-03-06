@@ -13,9 +13,6 @@ try { playwright = require('playwright'); } catch(e) {}
 // 缓存模块
 const cache = require('./cache');
 
-// 自适应抓取模块
-const adaptive = require('./adaptive');
-
 const PORT = process.env.PORT || 8080;
 const PROXY = process.env.HTTP_PROXY || 'http://127.0.0.1:7890';
 const CACHE_ENABLED = process.env.CACHE_ENABLED !== 'false';
@@ -471,44 +468,6 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/health') {
     res.writeHead(200);
     res.end(JSON.stringify({ status: 'ok', playwright: !!playwright, proxy: PROXY, cache: { enabled: CACHE_ENABLED, ttl: CACHE_TTL, status: cache.status() } }));
-    return;
-  }
-  
-  // 自适应抓取状态
-  if (pathname === '/adaptive/status' && req.method === 'GET') {
-    const urlParts = new URL(req.url, 'http://localhost');
-    const hostname = urlParts.searchParams.get('hostname');
-    if (hostname) {
-      const status = adaptive.getSiteStatus(hostname);
-      res.writeHead(200);
-      res.end(JSON.stringify({ hostname, ...status }));
-    } else {
-      // 返回支持的站点配置
-      res.writeHead(200);
-      res.end(JSON.stringify({
-        supportedSites: Object.keys(adaptive.SITE_CONFIGS),
-        userAgents: adaptive.USER_AGENTS.length,
-        defaultConfig: adaptive.DEFAULT_CONFIG
-      }));
-    }
-    return;
-  }
-  
-  // 重置自适应状态
-  if (pathname === '/adaptive/reset' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => {
-      try {
-        const p = body ? JSON.parse(body) : {};
-        adaptive.resetSiteState(p.hostname);
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true }));
-      } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: e.message }));
-      }
-    });
     return;
   }
   
