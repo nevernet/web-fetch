@@ -1,603 +1,100 @@
-require('dotenv').config();
-/**
- * Web-Fetch Server - AI-powered web scraping for RAG
- * 支持缓存机制、自适应抓取、Reddit API
- */
+#!/usr/bin/env node
 
-const http = require('http');
-const { execSync } = require('child_process');
+const { program } = require('commander');
+const chalk = require('chalk');
 
-let playwright = null;
-try { playwright = require('playwright'); } catch(e) {}
+const FETCH_URL = process.env.FETCH_URL || 'http://localhost:8080';
+const WEB_PORT = process.env.WEB_PORT || 8081;
 
-// 缓存模块
-const cache = require('./cache');
+// 命令列表
+const commands = {
+  fetch: require('./commands/fetch'),
+  stats: require('./commands/stats'),
+  alert: require('./commands/alert'),
+  log: require('./commands/log'),
+  server: require('./commands/server'),
+  clean: require('./commands/clean'),
+  help: () => {
+    console.log(`
+${chalk.bold('Web-Fetch CLI')}
 
-// 自适应抓取模块
-const adaptive = require('./adaptive');
+${chalk.cyan('使用:')} node src/index.js <command> [options]
 
-const PORT = process.env.PORT || 8080;
-const PROXY = process.env.HTTP_PROXY || 'http://127.0.0.1:7890';
-const CACHE_ENABLED = process.env.CACHE_ENABLED !== 'false';
-const CACHE_TTL = parseInt(process.env.CACHE_TTL || '3600');
+${chalk.cyan('命令:')}
+  ${chalk.green('fetch')}           采集新闻
+  ${chalk.green('stats')}           查看统计
+  ${chalk.green('alert')}            告警配置
+  ${chalk.green('log')}              查看日志
+  ${chalk.green('server')}           服务管理
+  ${chalk.green('clean')}            清理数据
 
-let browser = null;
-async function initPlaywright() {
-  if (!playwright || browser) return browser;
-  try {
-    browser = await playwright.chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-  } catch(e) {}
-  return browser;
-}
+${chalk.cyan('选项:')}
+  -h, --help           显示帮助
+  -v, --version        显示版本
 
-// ============ 网站指纹识别 & 自适应抓取策略 ============
-const SITE_STRATEGIES = {
-  'reddit': {
-    priority: 'api',
-    methods: ['api', 'playwright', 'curl'],
-    apiEndpoint: 'https://www.reddit.com',
-    extractHot: true
-  },
-  'twitter': {
-    priority: 'api',
-    methods: ['api', 'playwright'],
-    noCache: true
-  },
-  'news': {
-    priority: 'playwright',
-    methods: ['playwright', 'curl']
-  },
-  'default': {
-    priority: 'curl',
-    methods: ['curl', 'playwright']
+${chalk.cyan('示例:')}
+  node src/index.js fetch
+  node src/index.js fetch --format text
+  node src/index.js stats
+  node src/index.js server start
+`);
   }
 };
 
-function detectSiteType(url) {
-  const urlLower = url.toLowerCase();
-  if (urlLower.includes('reddit.com')) return 'reddit';
-  if (urlLower.includes('twitter.com') || urlLower.includes('x.com')) return 'twitter';
-  if (urlLower.includes('news') || urlLower.includes('nytimes') || urlLower.includes('reuters') || urlLower.includes('bbc')) return 'news';
-  if (urlLower.includes('github.com')) return 'github';
-  if (urlLower.includes('youtube.com')) return 'youtube';
-  if (urlLower.includes('stackoverflow.com')) return 'stackoverflow';
-  return 'default';
-}
+// 注册命令
+program
+  .name('web-fetch')
+  .description('Web-Fetch CLI + Web 监控面板')
+  .version('2.0.0');
 
-function getStrategy(url) {
-  const siteType = detectSiteType(url);
-  return SITE_STRATEGIES[siteType] || SITE_STRATEGIES.default;
-}
+// fetch 命令
+program
+  .command('fetch')
+  .description('采集新闻')
+  .option('-f, --format <type>', '输出格式 (json|text|list)', 'json')
+  .action((opts) => commands.fetch(opts));
 
-// ============ Reddit API 集成 ============
-async function fetchRedditHot(subreddit = 'popular', limit = 25) {
-  const cacheKey = cache.getCacheKey('reddit_hot', { subreddit, limit });
-  
-  if (CACHE_ENABLED) {
-    const cached = cache.get(cacheKey);
-    if (cached) return { success: true, data: { metadata: cached.metadata, markdown: cached.markdown, html: cached.html, links: cached.links, method: cached.method }, fromCache: true };
-  }
-  
-  try {
-    const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=${limit}`;
-    const result = fetchByCurl(url, 30000);
-    
-    if (!result.success) {
-      const fallbackUrl = `https://old.reddit.com/r/${subreddit}/hot.json?limit=${limit}`;
-      const fallback = fetchByCurl(fallbackUrl, 30000);
-      if (!fallback.success) {
-        return { success: false, error: result.error };
-      }
-      return parseRedditJSON(fallback.data, subreddit);
-    }
-    
-    const response = parseRedditJSON(result.data, subreddit);
-    
-    if (CACHE_ENABLED && response.success) {
-      cache.set(cacheKey, response.data, 600);
-    }
-    return response;
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
+// stats 命令
+program
+  .command('stats')
+  .description('查看统计')
+  .option('-v, --verbose', '详细输出')
+  .action((opts) => commands.stats(opts));
 
-function parseRedditJSON(data, subreddit) {
-  try {
-    const json = JSON.parse(data);
-    const posts = json.data.children.map(child => {
-      const d = child.data;
-      return {
-        id: d.id,
-        title: d.title,
-        author: d.author,
-        subreddit: d.subreddit,
-        url: d.url,
-        permalink: 'https://reddit.com' + d.permalink,
-        score: d.score,
-        numComments: d.num_comments,
-        isVideo: d.is_video,
-        isSelf: d.is_self,
-        selftext: d.selftext ? d.selftext.substring(0, 1000) : null,
-        thumbnail: d.thumbnail && d.thumbnail.startsWith('http') ? d.thumbnail : null,
-        preview: d.preview?.images?.[0]?.source?.url || null
-      };
-    });
-    
-    return { success: true, data: { subreddit, posts, count: posts.length } };
-  } catch (e) {
-    return { success: false, error: 'Failed to parse Reddit response: ' + e.message };
-  }
-}
+// alert 命令
+program
+  .command('alert')
+  .description('告警配置')
+  .option('-e, --enable', '启用告警')
+  .option('-d, --disable', '禁用告警')
+  .action((opts) => commands.alert(opts));
 
-async function searchReddit(query, limit = 25) {
-  const cacheKey = cache.getCacheKey('reddit_search', { query, limit });
-  
-  if (CACHE_ENABLED) {
-    const cached = cache.get(cacheKey);
-    if (cached) return { success: true, data: { metadata: cached.metadata, markdown: cached.markdown, html: cached.html, links: cached.links, method: cached.method }, fromCache: true };
-  }
-  
-  try {
-    const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(query)}&limit=${limit}&sort=relevance`;
-    const result = fetchByCurl(url, 30000);
-    if (!result.success) return { success: false, error: result.error };
-    
-    const response = parseRedditJSON(result.data, 'search');
-    if (CACHE_ENABLED && response.success) {
-      cache.set(cacheKey, response.data, 600);
-    }
-    return response;
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
+// log 命令
+program
+  .command('log')
+  .description('查看日志')
+  .option('-f, --follow', '实时跟踪')
+  .option('-l, --level <level>', '日志级别 (error|warn|info|debug)')
+  .action((opts) => commands.log(opts));
 
-// ============ 内容提取函数 ============
-function fetchByCurl(url, timeout) {
-  timeout = timeout || 30000;
-  try {
-    const cmd = 'curl -s --max-time ' + Math.floor(timeout/1000) + ' -x "' + PROXY + '" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" -L "' + url + '"';
-    const data = execSync(cmd, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
-    return { success: true, data };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
+// server 命令
+program
+  .command('server')
+  .description('服务管理')
+  .argument('<action>', 'start|stop|restart|status')
+  .action((action) => commands.server(action));
 
-async function fetchByPlaywright(url, timeout) {
-  timeout = timeout || 30000;
-  const b = await initPlaywright();
-  if (!b) return null;
-  let page;
-  try {
-    const context = await b.newContext({ proxy: { server: PROXY } });
-    page = await context.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
-    await page.waitForTimeout(3000);
-    const content = await page.content();
-    await context.close();
-    return { success: true, data: content };
-  } catch(e) {
-    if (page) await page.close();
-    return { success: false, error: e.message };
-  }
-}
+// clean 命令
+program
+  .command('clean')
+  .description('清理数据')
+  .argument('<target>', 'cache|logs|stats|all')
+  .action((target) => commands.clean(target));
 
-function htmlToMarkdown(html, options = {}) {
-  if (!html) return '';
-  let md = html;
-  
-  md = md.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-  md = md.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-  md = md.replace(/<(nav|header|footer|aside|sidebar)[^>]*>[\s\S]*?<\/\1>/gi, '\n');
-  
-  md = md.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n');
-  md = md.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n');
-  md = md.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n');
-  md = md.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n#### $1\n');
-  md = md.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n');
-  md = md.replace(/<br\s*\/?>/gi, '\n');
-  md = md.replace(/<div[^>]*>([\s\S]*?)<\/div>/gi, '\n$1\n');
-  md = md.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
-  md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
-  md = md.replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>/gi, '![$2]($1)');
-  md = md.replace(/<img[^>]*src="([^"]*)"[^>]*>/gi, '![]($1)');
-  md = md.replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, '**$1**');
-  md = md.replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, '**$1**');
-  md = md.replace(/<i[^>]*>([\s\S]*?)<\/i>/gi, '*$1*');
-  md = md.replace(/<em[^>]*>([\s\S]*?)<\/em>/gi, '*$1*');
-  md = md.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '\`$1\`');
-  md = md.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, '\n```\n$1\n```\n');
-  md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, '\n> $1\n');
-  
-  md = md.replace(/<[^>]+>/g, '');
-  
-  md = md.replace(/&nbsp;/g, ' ');
-  md = md.replace(/&amp;/g, '&');
-  md = md.replace(/&lt;/g, '<');
-  md = md.replace(/&gt;/g, '>');
-  md = md.replace(/&quot;/g, '"');
-  md = md.replace(/&#39;/g, "'");
-  md = md.replace(/&mdash;/g, '—');
-  md = md.replace(/&ndash;/g, '–');
-  
-  md = md.replace(/\n{3,}/g, '\n\n');
-  md = md.trim();
-  
-  if (options.maxLength) md = md.substring(0, options.maxLength);
-  return md;
-}
-
-function extractTitle(html) {
-  if (!html) return '';
-  let m = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]*)"/i);
-  if (m) return m[1].trim();
-  m = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-  if (m) return m[1].trim();
-  m = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
-  return m ? m[1].trim() : '';
-}
-
-function extractDescription(html) {
-  if (!html) return '';
-  // 优先使用 Open Graph description
-  let m = html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]*)"/i);
-  if (m && m[1].length > 20) return m[1].trim();
-  // 其次使用 meta description
-  m = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"/i);
-  if (m && m[1].length > 20) return m[1].trim();
-  // RAG优化：从页面第一个 h1 或大段落提取描述
-  m = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
-  if (m) return m[1].trim();
-  // 从第一个大段落提取
-  m = html.match(/<p[^>]*>([^<]{50,})<\/p>/i);
-  if (m) return m[1].replace(/<[^>]+>/g, '').trim().substring(0, 300);
-  return '';
-}
-
-function extractMainContent(html, options = {}) {
-  let content = html;
-  content = content.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-  content = content.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-  
-  // RAG优化：扩大内容提取区域，尝试多种选择器
-  const articlePatterns = [
-    /<article[^>]*>([\s\S]*?)<\/article>/gi,
-    /<main[^>]*>([\s\S]*?)<\/main>/gi,
-    /<div[^>]*class="[^"]*article[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
-    /<div[^>]*class="[^"]*post[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
-    /<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
-    /<div[^>]*id="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
-    /<div[^>]*class="[^"]*entry[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
-    /<div[^>]*class="[^"]*body[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
-    /<section[^>]*>([\s\S]*?)<\/section>/gi,
-    /<div[^>]*class="[^"]*text[^"]*"[^>]*>([\s\S]*?)<\/div>/gi,
-  ];
-  
-  for (const pattern of articlePatterns) {
-    const match = content.match(pattern);
-    if (match && match[1].length > 200) { content = match[1]; break; }
-  }
-  
-  // 移除噪音元素
-  content = content.replace(/<(nav|header|footer|aside|sidebar|menu|ad|advertisement|social|share|related)[^>]*>[\s\S]*?<\/\1>/gi, '');
-  content = content.replace(/<[^>]+>/g, ' ');
-  content = content.replace(/\s+/g, ' ').trim();
-  
-  // HTML实体解码
-  content = content.replace(/&nbsp;/g, ' ');
-  content = content.replace(/&amp;/g, '&');
-  content = content.replace(/&lt;/g, '<');
-  content = content.replace(/&gt;/g, '>');
-  content = content.replace(/&quot;/g, '"');
-  content = content.replace(/&#39;/g, "'");
-  content = content.replace(/&mdash;/g, '—');
-  content = content.replace(/&ndash;/g, '–');
-  content = content.replace(/&hellip;/g, '…');
-  content = content.replace(/&rsquo;/g, "'");
-  content = content.replace(/&lsquo;/g, "'");
-  content = content.replace(/&ldquo;/g, '"');
-  content = content.replace(/&rdquo;/g, '"');
-  
-  // RAG优化：增加默认最大长度
-  const maxLen = options.maxLength || 15000;
-  if (content.length > maxLen) content = content.substring(0, maxLen) + '...';
-  return content;
-}
-
-function extractLinks(html) {
-  const links = [];
-  const regex = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>/gi;
-  let match;
-  while ((match = regex.exec(html)) !== null) links.push(match[1]);
-  return [...new Set(links)].slice(0, 50);
-}
-
-// ============ 主抓取函数 ============
-async function scrape(url, options) {
-  options = options || {};
-  const formats = options.formats || ['markdown'];
-  const timeout = options.timeout || 30000;
-  const usePlaywright = options.playwright || false;
-  const noCache = options.noCache || false;
-  
-  const cacheKey = cache.getCacheKey('scrape', { url, formats, timeout, usePlaywright });
-  
-  if (CACHE_ENABLED && !noCache) {
-    const cachedData = cache.get(cacheKey);
-    if (cachedData) return { success: true, data: { metadata: cachedData.metadata, markdown: cachedData.markdown, html: cachedData.html, links: cachedData.links, method: cachedData.method }, fromCache: true };
-  }
-  
-  let result, method = 'curl';
-  const strategy = getStrategy(url);
-  
-  // 自适应：Reddit 用 API
-  if (url.includes('reddit.com') && strategy.extractHot) {
-    const match = url.match(/reddit\.com\/r\/([^/]+)/);
-    const subreddit = match ? match[1] : 'popular';
-    const apiResult = await fetchRedditHot(subreddit, 25);
-    if (apiResult.success) { result = { success: true, data: JSON.stringify(apiResult) }; method = 'api'; }
-  }
-  
-  if (!result || !result.success) {
-    if (usePlaywright || (strategy.priority === 'playwright' && playwright)) {
-      const pwResult = await fetchByPlaywright(url, timeout);
-      if (pwResult && pwResult.success) { result = pwResult; method = 'playwright'; }
-    }
-  }
-  
-  if (!result || !result.success) {
-    result = fetchByCurl(url, timeout);
-    method = 'curl';
-  }
-  
-  if (!result.success) return { success: false, error: result.error };
-  
-  const html = result.data;
-  const response = { success: true, data: {} };
-  
-  response.data.metadata = { 
-    sourceURL: url, 
-    title: extractTitle(html), 
-    description: extractDescription(html),
-    siteType: detectSiteType(url)
-  };
-  
-  for (const fmt of formats) {
-    const f = fmt.toLowerCase();
-    if (f === 'markdown' || f === 'text') response.data.markdown = htmlToMarkdown(html, { maxLength: options.maxLength || 8000 });
-    else if (f === 'html') response.data.html = html;
-    else if (f === 'links') response.data.links = extractLinks(html);
-  }
-  response.data.method = method;
-  
-  if (CACHE_ENABLED && !noCache) cache.set(cacheKey, response, CACHE_TTL);
-  return response;
-}
-
-async function search(query, options) {
-  options = options || {};
-  const limit = options.limit || 10;
-  const includeContent = options.includeContent || false;
-  const noCache = options.noCache || false;
-  const enhanceContent = options.enhanceContent !== false;
-  
-  const cacheKey = cache.getCacheKey('search', { query, limit, includeContent, enhanceContent });
-  
-  if (CACHE_ENABLED && !noCache) {
-    const cachedData = cache.get(cacheKey);
-    if (cachedData) return { success: true, data: { metadata: cachedData.metadata, markdown: cachedData.markdown, html: cachedData.html, links: cachedData.links, method: cachedData.method }, fromCache: true };
-  }
-  
-  const searchURL = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
-  const result = fetchByCurl(searchURL, 30000);
-  if (!result.success) return { success: false, error: result.error };
-  
-  const html = result.data;
-  const results = [];
-  const linkRegex = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>/gi;
-  const snippetRegex = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
-  
-  const links = [];
-  let match;
-  while ((match = linkRegex.exec(html)) !== null) {
-    let url = match[1];
-    try { const urlMatch = url.match(/uddg=([^&]+)/); if (urlMatch) url = decodeURIComponent(urlMatch[1]); } catch(e) {}
-    if (url.startsWith('http')) links.push(url);
-  }
-  
-  const snippets = [];
-  while ((match = snippetRegex.exec(html)) !== null) snippets.push(match[1].replace(/<[^>]+>/g, '').trim());
-  
-  const batch = links.slice(0, limit);
-  console.log('Search: fetching ' + batch.length + ' pages...');
-  
-  for (let i = 0; i < batch.length; i++) {
-    try {
-      const url = batch[i];
-      const pageResult = fetchByCurl(url, 15000);
-      if (!pageResult.success) continue;
-      
-      const pageHtml = pageResult.data;
-      let content = null;
-      if (includeContent || enhanceContent) content = extractMainContent(pageHtml, { maxLength: 12000 });
-      
-      results.push({
-        url: url,
-        title: extractTitle(pageHtml) || (i < snippets.length ? snippets[i] : ''),
-        description: extractDescription(pageHtml) || (i < snippets.length ? snippets[i] : ''),
-        content: content
-      });
-    } catch (e) { continue; }
-  }
-  
-  const response = { success: true, data: { query, results, total: results.length } };
-  if (CACHE_ENABLED && !noCache) cache.set(cacheKey, response.data, CACHE_TTL);
-  return response;
-}
-
-async function extract(url, options) {
-  const result = await scrape(url, { ...options, formats: ['markdown', 'html'], maxLength: 10000 });
-  if (!result.success) return { success: false, error: result.error };
-  
-  return {
-    success: true,
-    data: {
-      sourceURL: url,
-      extracted: {
-        title: result.data.metadata.title,
-        description: result.data.metadata.description,
-        content: extractMainContent(result.data.html || '', { maxLength: 8000 }),
-        markdown: result.data.markdown,
-        siteType: result.data.metadata.siteType
-      }
-    }
-  };
-}
-
-// ============ 服务器 ============
-const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'application/json');
-  
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-  
-  const pathname = req.url.split('?')[0];
-  
-  if (pathname === '/health') {
-    res.writeHead(200);
-    res.end(JSON.stringify({ status: 'ok', playwright: !!playwright, proxy: PROXY, cache: { enabled: CACHE_ENABLED, ttl: CACHE_TTL, status: cache.status() } }));
-    return;
-  }
-  
-  // 自适应抓取状态
-  if (pathname === '/adaptive/status' && req.method === 'GET') {
-    const urlParts = new URL(req.url, 'http://localhost');
-    const hostname = urlParts.searchParams.get('hostname');
-    if (hostname) {
-      const status = adaptive.getSiteStatus(hostname);
-      res.writeHead(200);
-      res.end(JSON.stringify({ hostname, ...status }));
-    } else {
-      // 返回支持的站点配置
-      res.writeHead(200);
-      res.end(JSON.stringify({
-        supportedSites: Object.keys(adaptive.SITE_CONFIGS),
-        userAgents: adaptive.USER_AGENTS.length,
-        defaultConfig: adaptive.DEFAULT_CONFIG
-      }));
-    }
-    return;
-  }
-  
-  // 重置自适应状态
-  if (pathname === '/adaptive/reset' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => {
-      try {
-        const p = body ? JSON.parse(body) : {};
-        adaptive.resetSiteState(p.hostname);
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true }));
-      } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: e.message }));
-      }
-    });
-    return;
-  }
-  
-  if (pathname === '/cache/status') { res.writeHead(200); res.end(JSON.stringify(cache.status())); return; }
-  
-  if (pathname === '/cache/clear' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => {
-      try {
-        const p = JSON.parse(body);
-        if (p.key) cache.clear(p.key); else cache.clearAll();
-        res.writeHead(200); res.end(JSON.stringify({ success: true, status: cache.status() }));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
-    });
-    return;
-  }
-  
-  // Reddit 热门帖子接口
-  if (pathname === '/reddit/hot' && req.method === 'GET') {
-    const urlParts = new URL(req.url, 'http://localhost');
-    const subreddit = urlParts.searchParams.get('subreddit') || 'popular';
-    const limit = parseInt(urlParts.searchParams.get('limit') || '25');
-    const result = await fetchRedditHot(subreddit, limit);
-    res.writeHead(200); res.end(JSON.stringify(result));
-    return;
-  }
-  
-  // Reddit 搜索接口
-  if (pathname === '/reddit/search' && req.method === 'GET') {
-    const urlParts = new URL(req.url, 'http://localhost');
-    const query = urlParts.searchParams.get('q') || urlParts.searchParams.get('query');
-    const limit = parseInt(urlParts.searchParams.get('limit') || '25');
-    if (!query) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: 'query required' })); return; }
-    const result = await searchReddit(query, limit);
-    res.writeHead(200); res.end(JSON.stringify(result));
-    return;
-  }
-  
-  if (req.method === 'POST' && pathname === '/scrape') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', async () => {
-      try {
-        const p = JSON.parse(body);
-        if (!p.url) throw new Error('url required');
-        const r = await scrape(p.url, p.options || {});
-        res.writeHead(200); res.end(JSON.stringify(r));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
-    });
-    return;
-  }
-  
-  if (req.method === 'POST' && pathname === '/search') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', async () => {
-      try {
-        const p = JSON.parse(body);
-        if (!p.query) throw new Error('query required');
-        const r = await search(p.query, p.options || {});
-        res.writeHead(200); res.end(JSON.stringify(r));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
-    });
-    return;
-  }
-  
-  if (req.method === 'POST' && pathname === '/extract') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', async () => {
-      try {
-        const p = JSON.parse(body);
-        if (!p.url) throw new Error('url required');
-        const r = await extract(p.url, p.options || {});
-        res.writeHead(200); res.end(JSON.stringify(r));
-      } catch (e) { res.writeHead(400); res.end(JSON.stringify({ success: false, error: e.message })); }
-    });
-    return;
-  }
-  
-  res.writeHead(404);
-  res.end(JSON.stringify({ error: 'not found', available: ['/health', '/cache/status', '/cache/clear', '/scrape', '/search', '/extract', '/reddit/hot', '/reddit/search'] }));
+// 默认显示帮助
+program.on('command:*', () => {
+  commands.help();
+  process.exit(1);
 });
 
-server.listen(PORT, () => {
-  console.log('Web-Fetch running on http://localhost:' + PORT);
-  console.log('Playwright: ' + (playwright ? '✅' : '❌'));
-  console.log('Proxy: ' + PROXY);
-  console.log('Cache: ' + (CACHE_ENABLED ? '✅ enabled (TTL: ' + CACHE_TTL + 's)' : '❌ disabled'));
-  console.log('Adaptive scraping: ✅ enabled');
-});
+program.parse();
