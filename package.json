@@ -28,5 +28,8 @@
     "ora": "^9.3.0",
     "turndown": "^7.2.2",
     "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "tailwindcss": "^4.2.1"
   }
 }

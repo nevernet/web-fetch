@@ -72,6 +72,8 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="utf-8">
   <title>Web-Fetch 监控面板</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; }
